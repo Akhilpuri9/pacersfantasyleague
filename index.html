@@ -211,6 +211,16 @@
   .group-code { font-family:'Bebas Neue',sans-serif; font-size:2rem; color:var(--gold); letter-spacing:4px; }
   .member-chip { display:inline-flex; align-items:center; gap:0.35rem; background:var(--bg3); border:1px solid var(--border); border-radius:20px; padding:0.3rem 0.75rem; font-size:0.78rem; margin:0.25rem; }
 
+  /* ── MATCH SCORE BLOCK ── */
+  .match-score-block { margin-top:0.75rem; padding:0.6rem 0.75rem; background:rgba(0,201,167,0.04); border:1px solid rgba(0,201,167,0.12); border-radius:10px; }
+  .match-score-row { display:flex; justify-content:space-between; align-items:center; padding:0.15rem 0; }
+  .score-inning-label { font-size:0.72rem; color:var(--muted); flex:1; }
+  .score-inning-val { font-size:0.88rem; font-weight:700; color:var(--teal); font-family:'Rajdhani',sans-serif; }
+  .match-winner-banner { margin-top:0.6rem; padding:0.45rem 0.75rem; background:rgba(240,180,41,0.08); border:1px solid rgba(240,180,41,0.2); border-radius:8px; font-size:0.8rem; color:var(--gold); font-weight:500; }
+
+  /* ── MY TEAMS PLAYER CHIP ── */
+  .myteam-player-chip { background:var(--bg3); border:1px solid var(--border); border-radius:8px; padding:0.4rem 0.6rem; }
+
   /* ── LIVE SCORE ── */
   .live-score-box { background:rgba(34,197,94,0.04); border:1px solid rgba(34,197,94,0.18); border-radius:14px; padding:1.25rem; }
   .score-team { display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem; }
@@ -803,6 +813,29 @@ const FIREBASE_CONFIG = {
 const CRIC_API_KEY = "11e03482-e61d-4b03-817f-01f331e364ea";
 
 // ============================================================
+// CORS PROXY WRAPPER
+// CricAPI blocks direct browser requests. Route through proxies.
+// ============================================================
+async function cricFetch(url) {
+  // Try direct first (works if CricAPI enables CORS)
+  try {
+    var r = await fetch(url, {signal: AbortSignal.timeout(5000)});
+    if (r.ok) { var d = await r.json(); if (d) return d; }
+  } catch(e) {}
+  // Fallback 1: corsproxy.io
+  try {
+    var r2 = await fetch("https://corsproxy.io/?" + encodeURIComponent(url), {signal: AbortSignal.timeout(8000)});
+    if (r2.ok) { var d2 = await r2.json(); if (d2) return d2; }
+  } catch(e) {}
+  // Fallback 2: allorigins
+  try {
+    var r3 = await fetch("https://api.allorigins.win/get?url=" + encodeURIComponent(url), {signal: AbortSignal.timeout(8000)});
+    if (r3.ok) { var j = await r3.json(); return JSON.parse(j.contents); }
+  } catch(e) {}
+  throw new Error("All fetch attempts failed for: " + url);
+}
+
+// ============================================================
 // POINTS SYSTEM (Dream 11 standard)
 // ============================================================
 const POINTS = {
@@ -819,6 +852,28 @@ const POINTS = {
 // ============================================================
 // MOCK MATCHES
 // ============================================================
+
+// Central match status helpers — use these everywhere, never inline the logic.
+// KEY FIX: No "ms !== 'preview'" caveat on the date check — that was the root cause bug.
+function matchStarted(m) {
+  if (!m) return false;
+  if (m.ms === "live" || m.ms === "result") return true;
+  if (m.status && (m.status.toLowerCase().includes("won") ||
+      m.status.toLowerCase().includes("drawn") ||
+      m.status.toLowerCase().includes("live"))) return true;
+  // Date passed? It has started. No "ms !== preview" exception.
+  if (m.dateTimeGMT && new Date() > new Date(m.dateTimeGMT)) return true;
+  return false;
+}
+function matchCompleted(m) {
+  if (!m) return false;
+  if (m.ms === "result") return true;
+  if (m.status && (m.status.toLowerCase().includes("won") || m.status.toLowerCase().includes("drawn"))) return true;
+  // T20 takes ~3.5 hrs; if >5 hrs past start time, treat as complete
+  if (m.dateTimeGMT && (new Date() - new Date(m.dateTimeGMT)) > 5 * 60 * 60 * 1000) return true;
+  return false;
+}
+
 const MOCK_MATCHES = [
   {id:"ipl26_1",name:"Royal Challengers Bengaluru vs Sunrisers Hyderabad",teams:["Royal Challengers Bengaluru","Sunrisers Hyderabad"],teamInfo:[{name:"Royal Challengers Bengaluru",shortname:"RCB"},{name:"Sunrisers Hyderabad",shortname:"SRH"}],dateTimeGMT:"2026-03-28T14:00:00Z",venue:"M. Chinnaswamy Stadium, Bengaluru",matchType:"T20",status:"Match not started",ms:"preview",score:[],matchNo:"Match 1"},
   {id:"ipl26_2",name:"Mumbai Indians vs Kolkata Knight Riders",teams:["Mumbai Indians","Kolkata Knight Riders"],teamInfo:[{name:"Mumbai Indians",shortname:"MI"},{name:"Kolkata Knight Riders",shortname:"KKR"}],dateTimeGMT:"2026-03-29T14:00:00Z",venue:"Wankhede Stadium, Mumbai",matchType:"T20",status:"Match not started",ms:"preview",score:[],matchNo:"Match 2"},
@@ -1252,6 +1307,7 @@ function showApp() {
   document.getElementById("app-page").style.display = "block";
   loadMatches();
   loadOverview();
+  startLiveScoreTracking();
 }
 
 // ============================================================
@@ -1295,9 +1351,14 @@ async function loadOverview() {
       tSnap.forEach(function(d){ myTeamMatchIds.push(d.data().matchId); });
     } catch(e) {}
   }
-  var upcoming = (window._matches || MOCK_MATCHES).filter(function(m){
-    return m.ms === "preview" || (!m.ms);
+  var allMatches = window._matches || MOCK_MATCHES;
+  var upcoming = allMatches.filter(function(m){
+    return !matchStarted(m);
   }).slice(0,4);
+  // Also get recently completed/live matches
+  var recentCompleted = allMatches.filter(function(m){
+    return matchStarted(m);
+  }).slice(-4); // Last 4 completed
 
   var statsHtml = '<div class="stats-row">'
     + statCard("&#127919;","Fantasy Points",totalPts,"var(--gold)")
@@ -1306,16 +1367,33 @@ async function loadOverview() {
     + statCard("&#129351;","Leaderboard Rank",rank,"var(--purple)")
     + '</div>';
 
-  var upcomingHtml = upcoming.map(function(m) {
+  function overviewMatchCard(m, myTeamMatchIds) {
     var t1 = m.teamInfo && m.teamInfo[0] ? m.teamInfo[0].shortname : "?";
     var t2 = m.teamInfo && m.teamInfo[1] ? m.teamInfo[1].shortname : "?";
     var hasTeam = myTeamMatchIds.indexOf(m.id) >= 0;
     var dt = m.dateTimeGMT ? new Date(m.dateTimeGMT) : null;
     var dtStr = dt ? dt.toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short"})+" - "+dt.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"}) : "";
-    var actionBtn = hasTeam
-      ? '<span class="badge badge-green">&#10003; Team Set</span>'
-      : '<button type="button" class="btn btn-gold btn-sm" onclick="event.stopPropagation();openTeamBuilder(\''+ m.id +'\')">+ Pick Team</button>';
-    return '<div class="upcoming-card">'
+    var isCompleted = matchCompleted(m);
+    var isLive = !isCompleted && (m.ms === "live" || (m.status && m.status.toLowerCase().includes("live")));
+    var actionBtn = "";
+    if (isCompleted) {
+      actionBtn = '<span class="badge" style="background:rgba(100,100,100,0.2);color:var(--muted);font-size:0.7rem">COMPLETED</span>';
+    } else if (isLive) {
+      actionBtn = '<span class="badge badge-green" style="font-size:0.7rem">&#9679; LIVE</span>';
+    } else if (hasTeam) {
+      actionBtn = '<span class="badge badge-green">&#10003; Team Set</span>';
+    } else {
+      actionBtn = '<button type="button" class="btn btn-gold btn-sm" onclick="event.stopPropagation();openTeamBuilder(\''+ m.id +'\')">+ Pick Team</button>';
+    }
+    var scoreBlock = "";
+    if ((isCompleted || isLive) && m.score && m.score.length) {
+      scoreBlock = '<div style="margin-top:0.6rem;padding-top:0.6rem;border-top:1px solid var(--border)">'
+        + m.score.map(function(s){ return '<div style="display:flex;justify-content:space-between;font-size:0.72rem"><span style="color:var(--muted)">'+s.inning+'</span><span style="color:'+(isLive?'var(--green)':'var(--teal)')+';font-weight:600">'+s.r+'/'+s.w+' ('+s.o+' ov)</span></div>'; }).join("")
+        + '</div>';
+    } else if (isCompleted && m.status && m.status.toLowerCase().includes("won")) {
+      scoreBlock = '<div style="margin-top:0.6rem;padding-top:0.6rem;border-top:1px solid var(--border);font-size:0.72rem;color:var(--teal)">&#127942; '+ m.status +'</div>';
+    }
+    return '<div class="upcoming-card" onclick="openMatchDetail(\''+m.id+'\')" style="cursor:pointer">'
       + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">'
       + '<span style="font-size:0.7rem;color:var(--muted)">'+(m.matchNo||"")+'</span>'
       + actionBtn
@@ -1326,14 +1404,21 @@ async function loadOverview() {
       + '<div style="display:flex;flex-direction:column;align-items:center;gap:0.4rem">'+teamLogoHtml(t2,36)+'<span style="font-family:Rajdhani,sans-serif;font-size:0.95rem;font-weight:700">'+t2+'</span></div>'
       + '</div>'
       + '<div style="margin-top:0.6rem;font-size:0.72rem;color:var(--muted)">&#128205; '+(m.venue||"TBA")+'</div>'
+      + scoreBlock
       + '</div>';
-  }).join("");
+  }
+
+  var recentHtml = recentCompleted.length
+    ? '<div class="overview-section-title">Recent Results</div><div class="upcoming-grid">' + recentCompleted.map(function(m){ return overviewMatchCard(m, myTeamMatchIds); }).join("") + '</div>'
+    : '';
+
+  var upcomingHtml = upcoming.map(function(m) { return overviewMatchCard(m, myTeamMatchIds); }).join("");
 
   container.innerHTML =
     '<div class="overview-welcome">Good to see you, <span class="overview-name">'+username+'</span></div>'
     + statsHtml
-    + '<div class="overview-section-title">Upcoming Matches</div>'
-    + '<div class="upcoming-grid">'+upcomingHtml+'</div>'
+    + (recentHtml || '')
+    + (upcoming.length ? '<div class="overview-section-title">Upcoming Matches</div><div class="upcoming-grid">'+upcomingHtml+'</div>' : '')
     + '<div class="overview-section-title">Quick Actions</div>'
     + '<div class="quick-actions">'
     + quickBtn("&#127955;","Matches","matches")
@@ -1359,14 +1444,25 @@ async function loadMatches() {
     matches = MOCK_MATCHES;
   } else {
     try {
-      var res = await fetch("https://api.cricapi.com/v1/matches?apikey=" + CRIC_API_KEY + "&offset=0");
-      var data = await res.json();
-      matches = (data.data || []).filter(function(m) {
+      var res = await cricFetch("https://api.cricapi.com/v1/matches?apikey=" + CRIC_API_KEY + "&offset=0");
+      var data = res;  // cricFetch returns parsed JSON
+      var apiMatches = (data.data || []).filter(function(m) {
         return m.name && (m.name.includes("IPL") || m.series_id === "d5a498c8-7596-4b93-8ab0-e0efc3345312" ||
           ["MI","CSK","RCB","KKR","SRH","DC","PBKS","RR","GT","LSG"].some(function(t){ return m.name.includes(t); }));
-      }).slice(0,15);
-      if (!matches.length) matches = MOCK_MATCHES;
-    } catch(e) { matches = MOCK_MATCHES; }
+      });
+      // Merge: use API matches + preserve any cached matches not in API results
+      if (apiMatches.length) {
+        // Preserve scores we already fetched for matches not in current API response
+        var cached = window._matches || [];
+        var apiIds = apiMatches.map(function(m){ return m.id; });
+        var preserved = cached.filter(function(m){ return apiIds.indexOf(m.id) < 0; });
+        matches = apiMatches.concat(preserved);
+        // Sort by date
+        matches.sort(function(a,b){ return new Date(a.dateTimeGMT||0) - new Date(b.dateTimeGMT||0); });
+      } else {
+        matches = window._matches || MOCK_MATCHES;
+      }
+    } catch(e) { matches = window._matches || MOCK_MATCHES; }
   }
   window._matches = matches;
   if (!matches.length) {
@@ -1382,18 +1478,77 @@ async function loadMatches() {
   }
   var sectionTitle = document.querySelector('#tab-matches .section-title');
   if (sectionTitle) sectionTitle.textContent = 'IPL 2026 Matches';
+  renderMatchCards(matches, myTeams);
+
+  // Background: fetch fresh match_info for ALL started matches to get real status + scores
+  if (CRIC_API_KEY !== "YOUR_CRICAPI_KEY") {
+    var needsFresh = matches.filter(function(m) { return matchStarted(m); });
+    if (needsFresh.length) fetchScoresForMatches(needsFresh, myTeams);
+  }
+}
+
+async function fetchScoresForMatches(matchList, myTeams) {
+  for (var i = 0; i < matchList.length; i++) {
+    try {
+      var m = matchList[i];
+      var res = await cricFetch("https://api.cricapi.com/v1/match_info?apikey=" + CRIC_API_KEY + "&id=" + m.id);
+      var data = res;  // cricFetch returns parsed JSON
+      if (data.data) {
+        var fresh = data.data;
+        var idx = (window._matches || []).findIndex(function(x){ return x.id === m.id; });
+        if (idx >= 0) {
+          if (fresh.score && fresh.score.length) window._matches[idx].score = fresh.score;
+          if (fresh.ms) window._matches[idx].ms = fresh.ms;
+          if (fresh.status && fresh.status !== "Match not started") window._matches[idx].status = fresh.status;
+        }
+      }
+    } catch(e) {}
+  }
+  var container = document.getElementById("matches-container");
+  if (container) renderMatchCards(window._matches, myTeams);
+  // Kick off points finalization for newly-complete matches
+  if (isConfigured) checkAndFinalizeCompletedMatches();
+}
+
+function renderMatchCards(matches, myTeams) {
+  var container = document.getElementById("matches-container");
+  if (!container) return;
   container.innerHTML = matches.map(function(m) {
-    var isLive = m.ms === "live" || (m.status && m.status.toLowerCase().includes("live"));
-    var isCompleted = m.ms === "result" || (m.status && (m.status.toLowerCase().includes("won") || m.status.toLowerCase().includes("drawn")));
+    var isCompleted = matchCompleted(m);
+    var isLive = !isCompleted && (m.ms === "live" || (m.status && m.status.toLowerCase().includes("live")));
     var isUpcoming = !isLive && !isCompleted;
     var t1 = (m.teamInfo && m.teamInfo[0] && m.teamInfo[0].shortname) || (m.teams && m.teams[0] && m.teams[0].substring(0,3)) || "T1";
     var t2 = (m.teamInfo && m.teamInfo[1] && m.teamInfo[1].shortname) || (m.teams && m.teams[1] && m.teams[1].substring(0,3)) || "T2";
     var matchTime = m.dateTimeGMT ? new Date(m.dateTimeGMT).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"}) : "";
     var statusClass = isLive ? "status-live" : isCompleted ? "status-completed" : "status-upcoming";
-    var statusText = isLive ? "LIVE" : isCompleted ? "COMPLETED" : "UPCOMING";
-    var scoreHtml = (m.score||[]).map(function(s){ return "<div>"+s.inning+": "+s.r+"/"+s.w+" ("+s.o+" ov)</div>"; }).join("") || "";
+    var statusText = isLive ? "&#9679; LIVE" : isCompleted ? "COMPLETED" : "UPCOMING";
+
+    // Build score display
+    var scoreHtml = "";
+    if (m.score && m.score.length) {
+      scoreHtml = '<div class="match-score-block">'
+        + m.score.map(function(s){
+            var teamShort = s.inning ? s.inning.split(" ").slice(-2).join(" ") : s.inning;
+            return '<div class="match-score-row"><span class="score-inning-label">' + (s.inning||"") + '</span>'
+              + '<span class="score-inning-val">' + s.r + '/' + s.w + ' <span style="color:var(--muted);font-size:0.72rem">(' + s.o + ' ov)</span></span></div>';
+          }).join("")
+        + '</div>';
+    } else if ((isLive || isCompleted) && m.status && m.status !== "Match not started") {
+      scoreHtml = '<div class="match-score-block"><div style="font-size:0.82rem;color:'+(isCompleted?'var(--teal)':'var(--green)')+'">'+m.status+'</div></div>';
+    }
+
+    // Winner banner for completed matches
+    var winnerHtml = "";
+    if (isCompleted && m.status && m.status.toLowerCase().includes("won")) {
+      winnerHtml = '<div class="match-winner-banner">&#127942; ' + m.status + '</div>';
+    }
+
     var myTeamHtml = myTeams[m.id] ? '<div class="my-team-badge">&#10003; Team Submitted</div>' : "";
-    var createBtn = (isUpcoming && !myTeams[m.id]) ? '<div style="margin-top:0.75rem"><button class="btn btn-gold btn-sm" type="button" onclick="event.stopPropagation();openTeamBuilder(\''+m.id+'\')">+ Create Team</button></div>' : "";
+    var createBtn = isUpcoming && !myTeams[m.id]
+      ? '<div style="margin-top:0.75rem"><button class="btn btn-gold btn-sm" type="button" onclick="event.stopPropagation();openTeamBuilder(\''+m.id+'\')">+ Create Team</button></div>'
+      : isLive && !myTeams[m.id]
+      ? '<div style="margin-top:0.75rem;font-size:0.75rem;color:var(--red)">&#128274; Team selection closed</div>'
+      : "";
     var l1 = teamLogoHtml(t1,40);
     var l2 = teamLogoHtml(t2,40);
     var mno = m.matchNo ? '<span style="font-size:0.7rem;color:var(--muted);letter-spacing:0.5px;text-transform:uppercase">'+m.matchNo+'</span>' : '';
@@ -1410,7 +1565,8 @@ async function loadMatches() {
       + '<div class="match-meta" style="margin-top:0.75rem">'
       + '<span>&#128205; '+(m.venue||"TBA")+'</span>'
       + '</div>'
-      + (scoreHtml ? '<div class="match-score">'+scoreHtml+'</div>' : '')
+      + scoreHtml
+      + winnerHtml
       + myTeamHtml + createBtn
       + '</div>';
   }).join("");
@@ -1424,41 +1580,176 @@ async function openMatchDetail(matchId) {
   if (!match) return;
   document.getElementById("detail-match-title").textContent = match.name;
   document.getElementById("match-detail-overlay").style.display = "block";
+  // Show spinner immediately while we fetch fresh data
+  document.getElementById("match-detail-content").innerHTML = '<div class="spinner"></div>';
+
+  // --- Fetch fresh score from API ---
+  if (CRIC_API_KEY !== "YOUR_CRICAPI_KEY") {
+    try {
+      var infoRes = await cricFetch("https://api.cricapi.com/v1/match_info?apikey=" + CRIC_API_KEY + "&id=" + matchId);
+      var infoData = infoRes;  // cricFetch returns parsed JSON
+      if (infoData.data) {
+        // Merge fresh fields back into the match object in _matches
+        var freshMatch = infoData.data;
+        // Only overwrite with API data if it's actually meaningful
+        if (freshMatch.score && freshMatch.score.length) match.score = freshMatch.score;
+        if (freshMatch.ms) match.ms = freshMatch.ms;
+        if (freshMatch.status && freshMatch.status !== "Match not started") match.status = freshMatch.status;
+        // Patch window._matches so cards stay current
+        if (window._matches) {
+          var idx = window._matches.findIndex(function(m){ return m.id === matchId; });
+          if (idx >= 0) {
+            window._matches[idx].score = match.score;
+            window._matches[idx].ms = match.ms;
+            window._matches[idx].status = match.status;
+          }
+        }
+      }
+    } catch(e) { /* fall through with cached data */ }
+  }
+
   var content = "";
-  if (match.score && match.score.length) {
+
+  // --- Live score box ---
+  var scoreData = match.score || [];
+  if (scoreData.length) {
+    var isLiveStatus = match.ms === "live" || (match.status && match.status.toLowerCase().includes("live"));
+    var scoreLabel = isLiveStatus ? '&#9679; Live Score' : 'Match Score';
+    var scoreLabelColor = isLiveStatus ? 'var(--green)' : 'var(--teal)';
     content += '<div class="live-score-box" style="margin-bottom:1.5rem">'
-      + '<div style="font-size:0.8rem;color:var(--green);margin-bottom:0.75rem;text-transform:uppercase;letter-spacing:1px">Live Score</div>'
-      + match.score.map(function(s){
+      + '<div style="font-size:0.8rem;color:'+scoreLabelColor+';margin-bottom:0.75rem;text-transform:uppercase;letter-spacing:1px">'+scoreLabel+'</div>'
+      + scoreData.map(function(s){
           return '<div class="score-team"><div style="font-size:0.9rem;font-weight:500">'+s.inning+'</div><div class="score-val">'+s.r+'/'+s.w+'</div></div>'
                + '<div class="score-overs">'+s.o+' overs</div>';
         }).join('<div style="margin:0.5rem 0;border-top:1px solid var(--border)"></div>')
+      + (match.status ? '<div style="margin-top:0.75rem;font-size:0.8rem;color:var(--muted)">'+match.status+'</div>' : '')
+      + '</div>';
+  } else if ((match.ms === "live" || match.ms === "result") && match.status && match.status !== "Match not started") {
+    // Fallback: no score array but we have a status string
+    var isLiveStatus2 = match.ms === "live" || (match.status && match.status.toLowerCase().includes("live"));
+    content += '<div class="live-score-box" style="margin-bottom:1.5rem">'
+      + '<div style="font-size:0.8rem;color:'+(isLiveStatus2?'var(--green)':'var(--teal)')+';margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:1px">'+(isLiveStatus2?'&#9679; Live':'Match Result')+'</div>'
+      + '<div style="font-size:0.95rem;font-weight:500">'+match.status+'</div>'
       + '</div>';
   }
+
+  var isMatchStarted = matchStarted(match);
+  var isMatchCompleted = matchCompleted(match);
+
   if (isConfigured) {
     try {
       var teamsSnap = await db.collection("teams").where("matchId","==",matchId).get();
       var teams = [];
       teamsSnap.forEach(function(d){ teams.push(Object.assign({id:d.id},d.data())); });
       if (teams.length) {
-        var userIds = [...new Set(teams.map(function(t){ return t.userId; }))];
-        var users = {};
-        await Promise.all(userIds.map(async function(uid){
-          var u = await db.collection("users").doc(uid).get();
-          users[uid] = (u.data() && u.data().username) ? u.data().username : uid;
-        }));
-        var sorted = teams.sort(function(a,b){ return (b.points||0)-(a.points||0); });
+        var myTeam = teams.find(function(t){ return currentUser && t.userId === currentUser.uid; });
+
+        if (!isMatchStarted) {
+          // BEFORE match starts: show only current user's own team, hide everyone else's
+          content += '<div class="card" style="margin-bottom:1.5rem"><div class="card-title">My Team</div>'
+            + '<div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">&#128274; Other players\' teams are hidden until the match starts. '
+            + teams.length + ' team(s) registered.</div>';
+          if (myTeam) {
+            var pnames = myTeam.playerNames || {};
+            var capName = pnames[myTeam.captainId] || myTeam.captainId || '—';
+            var vcName  = pnames[myTeam.viceCaptainId] || myTeam.viceCaptainId || '—';
+            content += '<div style="font-size:0.8rem;color:var(--green);margin-bottom:0.5rem">&#10003; Team submitted</div>'
+              + '<div style="font-size:0.8rem;color:var(--muted);margin-bottom:0.75rem">'
+              + 'C: <strong style="color:var(--gold)">' + capName + '</strong>'
+              + ' &nbsp;·&nbsp; VC: <strong style="color:var(--teal)">' + vcName + '</strong></div>'
+              + '<div style="display:flex;flex-wrap:wrap;gap:0.4rem">'
+              + (myTeam.players||[]).map(function(pid){
+                  var nm = pnames[pid] || pid;
+                  var isCap = pid === myTeam.captainId;
+                  var isVC2 = pid === myTeam.viceCaptainId;
+                  var badge = isCap ? ' <span style="color:var(--gold);font-size:0.65rem">C</span>'
+                            : isVC2 ? ' <span style="color:var(--teal);font-size:0.65rem">VC</span>' : '';
+                  return '<span style="background:var(--bg3);border-radius:6px;padding:0.3rem 0.55rem;font-size:0.78rem">'
+                    + nm.split(' ').slice(-1)[0] + badge + '</span>';
+                }).join('')
+              + '</div>';
+          } else {
+            content += '<div style="font-size:0.85rem;color:var(--muted)">You haven\'t submitted a team for this match yet.</div>';
+          }
+          content += '</div>';
+
+        } else {
+          // AFTER match starts / completed: show full leaderboard
+          var userIds = Array.from(new Set(teams.map(function(t){ return t.userId; })));
+          var users = {};
+          await Promise.all(userIds.map(async function(uid){
+            var u = await db.collection('users').doc(uid).get();
+            users[uid] = (u.data() && (u.data().fullname || u.data().username)) || uid;
+          }));
+          var sorted = teams.slice().sort(function(a,b){ return (b.points||0)-(a.points||0); });
+          var leaderboardNote = isMatchCompleted
+            ? '<div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">Final standings</div>'
+            : '<div style="font-size:0.75rem;color:var(--green);margin-bottom:0.75rem">&#9679; Live — updating every 15 minutes</div>';
+          var rowsHtml = sorted.map(function(t, i){
+            var isMe = currentUser && t.userId === currentUser.uid;
+            var playerPts = t.playerPoints || {};
+            var pnames2 = t.playerNames || {};
+            var detailId = 'ppts-' + t.id;
+            var breakdownHtml = (t.players && t.players.length)
+              ? '<tr id="' + detailId + '" style="display:none"><td colspan="3" style="padding:0">'
+                + '<div style="background:var(--bg3);padding:0.75rem 1rem;border-radius:8px;margin:0.25rem 0">'
+                + '<div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:0.5rem">Player Breakdown</div>'
+                + t.players.map(function(pid){
+                    var base = playerPts[pid] || 0;
+                    var isCap2 = pid === t.captainId;
+                    var isVC3  = pid === t.viceCaptainId;
+                    var mult = isCap2 ? 2 : isVC3 ? 1.5 : 1;
+                    var earned = Math.round(base * mult);
+                    var pname2 = pnames2[pid] || pid;
+                    var badge2 = isCap2 ? ' <span style="color:var(--gold);font-size:0.7rem">(C\xd72)</span>'
+                               : isVC3  ? ' <span style="color:var(--teal);font-size:0.7rem">(VC\xd71.5)</span>' : '';
+                    return '<div style="display:flex;justify-content:space-between;padding:0.2rem 0;font-size:0.82rem">'
+                      + '<span>' + pname2 + badge2 + '</span>'
+                      + '<span style="color:' + (earned > 0 ? 'var(--gold)' : 'var(--muted)') + '">' + earned + ' pts</span>'
+                      + '</div>';
+                  }).join('')
+                + '</div></td></tr>'
+              : '';
+            var expandBtn = (t.players && t.players.length)
+              ? ' <button type="button" style="background:none;border:none;cursor:pointer;color:var(--teal);font-size:0.75rem;padding:0;margin-left:0.4rem"'
+                + ' onclick="var el=document.getElementById(\'' + detailId + '\');el.style.display=el.style.display===\'none\'?\'table-row\':\'none\'">▾</button>'
+              : '';
+            var nameCell = users[t.userId]
+              + (isMe ? ' <span style="color:var(--teal);font-size:0.75rem">(you)</span>' : '');
+            return '<tr class="' + (isMe ? 'me-row' : '') + '">'
+              + '<td><div class="rank-badge ' + (i < 3 ? 'rank-' + (i+1) : 'rank-other') + '">' + (i+1) + '</div></td>'
+              + '<td>' + nameCell + '</td>'
+              + '<td style="color:var(--gold);font-weight:700;font-family:\'Rajdhani\',sans-serif;font-size:1.15rem">' + (t.points||0) + expandBtn + '</td>'
+              + '</tr>' + breakdownHtml;
+          }).join('');
+          content += '<div class="card" style="margin-bottom:1.5rem"><div class="card-title">Match Leaderboard</div>'
+            + leaderboardNote
+            + '<table class="leaderboard-table"><thead><tr><th>#</th><th>Player</th><th>Points</th></tr></thead><tbody>'
+            + rowsHtml + '</tbody></table>'
+            + (isMatchCompleted
+                ? '<div style="margin-top:1rem;display:flex;gap:0.5rem;flex-wrap:wrap">'
+                  + '<button class="btn btn-outline btn-sm" type="button" onclick="triggerPointsUpdate(\'' + matchId + '\')">&#8635; Recalculate Points</button>'
+                  + '<button class="btn btn-gold btn-sm" type="button" onclick="triggerFinalizePoints(\'' + matchId + '\')">&#10003; Finalize &amp; Update Leaderboard</button>'
+                  + '</div>'
+                : '<div style="margin-top:1rem"><button class="btn btn-outline btn-sm" type="button" onclick="triggerPointsUpdate(\'' + matchId + '\')">&#8635; Refresh Live Points</button></div>')
+            + '</div>';
+        }
+      } else {
         content += '<div class="card" style="margin-bottom:1.5rem"><div class="card-title">Match Leaderboard</div>'
-          + '<table class="leaderboard-table"><thead><tr><th>#</th><th>Player</th><th>Points</th></tr></thead><tbody>'
-          + sorted.map(function(t,i){
-              return '<tr class="'+(t.userId===currentUser.uid?"me-row":"")+'"><td><div class="rank-badge '+(i<3?"rank-"+(i+1):"rank-other")+'">'+(i+1)+'</div></td>'
-                + '<td>'+users[t.userId]+(t.userId===currentUser.uid?" (you)":"")+'</td>'
-                + '<td style="color:var(--gold);font-weight:600">'+(t.points||0)+'</td></tr>';
-            }).join("")
-          + '</tbody></table></div>';
+          + (isMatchStarted
+              ? '<div style="font-size:0.85rem;color:var(--muted);padding:1rem 0">No teams submitted for this match yet.</div>'
+              : '<div style="font-size:0.85rem;color:var(--muted);padding:0.5rem 0">No teams yet — be the first to create one!</div>')
+          + '</div>';
       }
-    } catch(e) {}
+    } catch(e) {
+      content += '<div class="card" style="margin-bottom:1.5rem"><div style="font-size:0.85rem;color:var(--muted)">Could not load leaderboard data.</div></div>';
+    }
   }
-  content += '<div style="margin-top:1.5rem"><button class="btn btn-gold" type="button" onclick="openTeamBuilder(\''+matchId+'\');closeMatchDetail()">+ Create Team for This Match</button></div>';
+
+  // Only show "Create Team" button if match hasn't started yet
+  if (!isMatchStarted) {
+    content += '<div style="margin-top:1.5rem"><button class="btn btn-gold" type="button" onclick="openTeamBuilder(\''+matchId+'\');closeMatchDetail()">+ Create Team for This Match</button></div>';
+  }
   document.getElementById("match-detail-content").innerHTML = content;
 }
 
@@ -1472,9 +1763,10 @@ function closeMatchDetail() {
 async function openTeamBuilder(matchId) {
   var match = (window._matches || MOCK_MATCHES).find(function(m){ return m.id === matchId; });
   if (!match) return;
-  var matchTime = new Date(match.dateTimeGMT);
-  if (matchTime < new Date() && match.ms !== "preview") {
-    showToast("Match has already started! Team selection is closed.", "error"); return;
+  var matchIsCompleted = matchCompleted(match);
+  var matchHasStarted = matchStarted(match);
+  if (matchHasStarted) {
+    showToast(matchIsCompleted ? "Match has ended! Team selection is closed." : "Match has already started! Team selection is closed.", "error"); return;
   }
   currentMatchForTeam = match;
   selectedPlayers = [];
@@ -1517,8 +1809,8 @@ async function fetchMatchPlayers(matchId, match) {
   }
   if (MOCK_PLAYERS[matchId]) return MOCK_PLAYERS[matchId];
   try {
-    var res = await fetch("https://api.cricapi.com/v1/match_squad?apikey=" + CRIC_API_KEY + "&id=" + matchId);
-    var data = await res.json();
+    var res = await cricFetch("https://api.cricapi.com/v1/match_squad?apikey=" + CRIC_API_KEY + "&id=" + matchId);
+    var data = res;  // cricFetch returns parsed JSON
     var players = [];
     (data.data || []).forEach(function(team){
       (team.players || []).forEach(function(p){
@@ -1540,8 +1832,8 @@ function inferRole(r) {
 async function fetchPlaying11(matchId) {
   if (!matchId || CRIC_API_KEY === "YOUR_CRICAPI_KEY") return;
   try {
-    var res = await fetch("https://api.cricapi.com/v1/match_info?apikey=" + CRIC_API_KEY + "&id=" + matchId);
-    var data = await res.json();
+    var res = await cricFetch("https://api.cricapi.com/v1/match_info?apikey=" + CRIC_API_KEY + "&id=" + matchId);
+    var data = res;  // cricFetch returns parsed JSON
     var matchData = data.data;
     if (!matchData) return;
     var playing = [];
@@ -1758,10 +2050,17 @@ function closeCaptainModal() {
 async function saveTeam() {
   if (selectedPlayers.length !== 11) { showToast("Select exactly 11 players", "error"); return; }
   if (!captainId || !viceCaptainId) { showToast("Set Captain and Vice Captain", "error"); return; }
+  // Build id→name map from currentPlayerList so scorecard matching never needs a second API call
+  var playerNamesMap = {};
+  selectedPlayers.forEach(function(pid) {
+    var p = currentPlayerList.find(function(pl){ return pl.id === pid; });
+    if (p) playerNamesMap[pid] = p.name;
+  });
   var teamData = {
     userId: currentUser.uid, matchId: currentMatchForTeam.id,
     matchName: currentMatchForTeam.name, players: selectedPlayers,
     captainId: captainId, viceCaptainId: viceCaptainId,
+    playerNames: playerNamesMap,
     points: 0, playerPoints: {},
     createdAt: isConfigured ? firebase.firestore.FieldValue.serverTimestamp() : new Date().toISOString()
   };
@@ -1788,12 +2087,72 @@ function closeTeamBuilder() {
   document.getElementById("team-builder-overlay").style.display = "none";
 }
 
+async function triggerPointsUpdate(matchId) {
+  if (!isConfigured) { showToast("Firebase required to update points", "error"); return; }
+  showToast("Recalculating points...", "success");
+  try {
+    var match = (window._matches || MOCK_MATCHES).find(function(m){ return m.id === matchId; });
+    // If API key is configured, use full live engine (fetches scorecard)
+    if (CRIC_API_KEY !== "YOUR_CRICAPI_KEY" && match) {
+      await updateLivePointsForMatch(match);
+      showToast("Points updated from live scorecard!", "success");
+      openMatchDetail(matchId);
+      return;
+    }
+
+    // Fallback: re-sum from stored playerPoints (no API)
+    var teamsSnap = await db.collection("teams").where("matchId","==",matchId).get();
+    var teams = [];
+    teamsSnap.forEach(function(d){ teams.push(Object.assign({id:d.id},d.data())); });
+    if (!teams.length) { showToast("No teams found for this match", "error"); return; }
+
+    var batch = db.batch();
+    var userPointsMap = {};
+    teams.forEach(function(team) {
+      var rawPts = 0;
+      var playerPts = team.playerPoints || {};
+      Object.keys(playerPts).forEach(function(pid) {
+        var base = playerPts[pid] || 0;
+        var mult = pid === team.captainId ? 2 : pid === team.viceCaptainId ? 1.5 : 1;
+        rawPts += base * mult;
+      });
+      var finalPts = rawPts > 0 ? Math.round(rawPts) : (team.points || 0);
+      batch.update(db.collection("teams").doc(team.id), { points: finalPts });
+      userPointsMap[team.userId] = (userPointsMap[team.userId] || 0) + finalPts;
+    });
+
+    var alreadyFinalized = teams.some(function(t){ return t.pointsFinalized; });
+    if (!alreadyFinalized) {
+      for (var uid in userPointsMap) {
+        batch.update(db.collection("users").doc(uid), {
+          totalPoints: firebase.firestore.FieldValue.increment(userPointsMap[uid]),
+          matchesPlayed: firebase.firestore.FieldValue.increment(1)
+        });
+      }
+      teams.forEach(function(t){
+        batch.update(db.collection("teams").doc(t.id), { pointsFinalized: true });
+      });
+    }
+    await batch.commit();
+    await computeAndSaveSeasonPoints(matchId);
+    showToast("Points updated!", "success");
+    openMatchDetail(matchId);
+  } catch(e) {
+    showToast("Error updating points: " + e.message, "error");
+  }
+}
+
 async function computeAndSaveSeasonPoints(matchId) {
   if (!isConfigured) return;
   var teamsSnap = await db.collection("teams").where("matchId","==",matchId).get();
   var teams = [];
   teamsSnap.forEach(function(d){ teams.push(Object.assign({id:d.id},d.data())); });
   if (!teams.length) return;
+  // Guard: if season points were already assigned for this match, skip to avoid double-counting
+  if (teams.some(function(t){ return t.seasonPoints && t.seasonPoints > 0; })) {
+    console.log("Season points already assigned for match", matchId, "- skipping");
+    return;
+  }
   teams.sort(function(a,b){ return (b.points||0)-(a.points||0); });
   var seasonPtsMap = [11,10,9,8,7,6,5,4,3,2,1];
   var batch = db.batch();
@@ -1806,6 +2165,39 @@ async function computeAndSaveSeasonPoints(matchId) {
   });
   await batch.commit();
   showToast("Season points updated!", "success");
+}
+
+// Force-finalize a completed match: re-fetch scorecard, compute points, write to users + season
+async function triggerFinalizePoints(matchId) {
+  if (!isConfigured) { showToast("Firebase required", "error"); return; }
+  showToast("Finalizing match points...", "success");
+  try {
+    var match = (window._matches || MOCK_MATCHES).find(function(m){ return m.id === matchId; });
+    // 1. Run scorecard update if API available
+    if (CRIC_API_KEY !== "YOUR_CRICAPI_KEY" && match) {
+      await updateLivePointsForMatch(match);
+    }
+    // 2. Force-finalize even if already flagged (re-run to fix any gaps)
+    var freshSnap = await db.collection("teams").where("matchId","==",matchId).get();
+    var freshTeams = [];
+    freshSnap.forEach(function(d){ freshTeams.push(Object.assign({id:d.id},d.data())); });
+    if (!freshTeams.length) { showToast("No teams for this match", "error"); return; }
+    // Reset finalization flag so we can re-run cleanly
+    var resetBatch = db.batch();
+    freshTeams.forEach(function(t){
+      resetBatch.update(db.collection("teams").doc(t.id), { pointsFinalized: false });
+    });
+    await resetBatch.commit();
+    // Now run finalize
+    await finalizeMatchPoints(matchId, freshTeams);
+    showToast("Points finalized and leaderboard updated!", "success");
+    openMatchDetail(matchId);
+    // Also refresh leaderboard tab if open
+    var leaderboardEl = document.getElementById("tab-leaderboard");
+    if (leaderboardEl && leaderboardEl.style.display !== "none") loadLeaderboard();
+  } catch(e) {
+    showToast("Error: " + e.message, "error");
+  }
 }
 
 // ============================================================
@@ -1827,24 +2219,125 @@ async function loadMyTeams() {
     container.innerHTML = '<div class="empty-state"><div class="icon">&#127955;</div><div>No teams yet</div><div style="margin-top:0.5rem;font-size:0.85rem">Go to Matches and create your first team!</div></div>';
     return;
   }
+  // Sort by date - most recent first
+  teams.sort(function(a,b){
+    var ma = (window._matches||[]).find(function(m){ return m.id === a.matchId; });
+    var mb = (window._matches||[]).find(function(m){ return m.id === b.matchId; });
+    var da = ma ? new Date(ma.dateTimeGMT||0) : new Date(0);
+    var db2 = mb ? new Date(mb.dateTimeGMT||0) : new Date(0);
+    return db2 - da;
+  });
   container.innerHTML = teams.map(function(team) {
-    return '<div class="team-display" style="margin-bottom:1.25rem">'
-      + '<div class="team-display-header"><div><h3>&#127955; ' + (team.matchName||team.matchId) + '</h3>'
-      + '<div style="font-size:0.8rem;color:var(--muted);margin-top:0.25rem">' + (team.players&&team.players.length||0) + ' players selected</div></div>'
-      + '<div style="text-align:right"><div style="font-family:\'Rajdhani\',sans-serif;font-size:1.75rem;font-weight:700;color:var(--gold)">' + (team.points||0) + '</div><div style="font-size:0.75rem;color:var(--muted)">Points</div></div></div>'
-      + '<div class="team-grid">'
-      + '<div style="display:flex;gap:1rem;margin-bottom:0.75rem;font-size:0.8rem">'
-      + '<span style="color:var(--gold)">&#128081; C: ' + (team.captainId||"Not set") + '</span>'
-      + '<span style="color:var(--blue)">&#11088; VC: ' + (team.viceCaptainId||"Not set") + '</span>'
+    var matchObj = (window._matches||[]).find(function(m){ return m.id === team.matchId; });
+    var isCompleted = matchObj && matchCompleted(matchObj);
+    var isLive = matchObj && !isCompleted && (matchObj.ms === "live" || (matchObj.status && matchObj.status.toLowerCase().includes("live")));
+    var matchStatusBadge = isCompleted
+      ? '<span class="match-status status-completed" style="font-size:0.65rem;padding:2px 8px">COMPLETED</span>'
+      : isLive
+      ? '<span class="match-status status-live" style="font-size:0.65rem;padding:2px 8px">&#9679; LIVE</span>'
+      : '<span class="match-status status-upcoming" style="font-size:0.65rem;padding:2px 8px">UPCOMING</span>';
+    var matchDate = matchObj && matchObj.dateTimeGMT
+      ? new Date(matchObj.dateTimeGMT).toLocaleDateString("en-IN",{weekday:"short",day:"numeric",month:"short"})
+      : "";
+    var t1short = matchObj && matchObj.teamInfo && matchObj.teamInfo[0] ? matchObj.teamInfo[0].shortname : "";
+    var t2short = matchObj && matchObj.teamInfo && matchObj.teamInfo[1] ? matchObj.teamInfo[1].shortname : "";
+
+    // Get all players from squads to look up names
+    var allPlayers = [];
+    if (t1short && IPL_2026_SQUADS[t1short]) allPlayers = allPlayers.concat(IPL_2026_SQUADS[t1short]);
+    if (t2short && IPL_2026_SQUADS[t2short]) allPlayers = allPlayers.concat(IPL_2026_SQUADS[t2short]);
+    function getPlayerName(pid) {
+      var p = allPlayers.find(function(pl){ return pl.id === pid; });
+      return p ? p.name : pid;
+    }
+    function getPlayerTeam(pid) {
+      var p = allPlayers.find(function(pl){ return pl.id === pid; });
+      return p ? p.team : "";
+    }
+    function getPlayerRole(pid) {
+      var p = allPlayers.find(function(pl){ return pl.id === pid; });
+      return p ? p.role : "";
+    }
+
+    var capName = team.captainId ? getPlayerName(team.captainId) : "Not set";
+    var vcName = team.viceCaptainId ? getPlayerName(team.viceCaptainId) : "Not set";
+
+    // Group players by role
+    var grouped = {WK:[], BAT:[], AR:[], BOWL:[]};
+    (team.players||[]).forEach(function(pid) {
+      var role = getPlayerRole(pid);
+      if (grouped[role]) grouped[role].push(pid);
+      else grouped["BAT"].push(pid);
+    });
+
+    function playerChip(pid) {
+      var name = getPlayerName(pid);
+      var pts = (team.playerPoints && team.playerPoints[pid]) || 0;
+      var isC = pid === team.captainId;
+      var isVC = pid === team.viceCaptainId;
+      var pteam = getPlayerTeam(pid);
+      var teamColor = pteam === t1short ? "var(--teal)" : "var(--blue)";
+      return '<div class="myteam-player-chip" style="border-left:3px solid '+teamColor+'">'
+        + '<div style="display:flex;justify-content:space-between;align-items:start">'
+        + '<div>'
+        + '<span style="font-size:0.8rem;font-weight:600;color:var(--text)">' + name + '</span>'
+        + (isC ? ' <span class="cap-badge">C</span>' : '')
+        + (isVC ? ' <span class="vc-badge">VC</span>' : '')
+        + '</div>'
+        + '<span style="font-size:0.8rem;font-weight:700;color:'+(pts>0?'var(--gold)':'var(--muted)')+'">'+pts+'<span style="font-size:0.65rem;font-weight:400;color:var(--muted)"> pts</span></span>'
+        + '</div>'
+        + '<div style="font-size:0.65rem;color:var(--muted);margin-top:1px">' + pteam + '</div>'
+        + '</div>';
+    }
+
+    var roleLabels = {WK:"Wicket Keepers",BAT:"Batters",AR:"All Rounders",BOWL:"Bowlers"};
+    var roleIcons = {WK:"🧤",BAT:"🏏",AR:"⚡",BOWL:"🎯"};
+    var playersHtml = Object.keys(grouped).map(function(role) {
+      if (!grouped[role].length) return "";
+      return '<div style="margin-bottom:0.85rem">'
+        + '<div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:0.4rem">' + roleIcons[role] + ' ' + roleLabels[role] + '</div>'
+        + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:0.4rem">'
+        + grouped[role].map(playerChip).join("")
+        + '</div></div>';
+    }).join("");
+
+    // Score for completed matches
+    var scoreHtml = "";
+    if (matchObj && matchObj.score && matchObj.score.length && isCompleted) {
+      scoreHtml = '<div style="padding:0.75rem 1.25rem;background:rgba(0,201,167,0.04);border-top:1px solid var(--border)">'
+        + '<div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:1px;color:var(--teal);margin-bottom:0.4rem">Match Score</div>'
+        + matchObj.score.map(function(s){ return '<div style="display:flex;justify-content:space-between;font-size:0.8rem"><span style="color:var(--muted)">'+s.inning+'</span><span style="font-weight:700;color:var(--teal)">'+s.r+'/'+s.w+' ('+s.o+' ov)</span></div>'; }).join("")
+        + (matchObj.status && matchObj.status.toLowerCase().includes("won") ? '<div style="margin-top:0.35rem;font-size:0.72rem;color:var(--gold)">&#127942; '+matchObj.status+'</div>' : '')
+        + '</div>';
+    }
+
+    // Edit button only shown if match hasn't started
+    var canEdit = matchObj && !matchStarted(matchObj);
+    var editBtn = canEdit
+      ? '<button class="btn btn-outline btn-sm" type="button" onclick="openTeamBuilder(\'' + team.matchId + '\')" style="margin-top:0.35rem;font-size:0.72rem">&#9998; Edit Team</button>'
+      : '';
+    return '<div class="team-display" style="margin-bottom:1.5rem">'
+      + '<div class="team-display-header">'
+      + '<div style="flex:1;min-width:0">'
+      + '<div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.3rem">'
+      + matchStatusBadge
+      + (matchDate ? '<span style="font-size:0.72rem;color:var(--muted)">'+matchDate+'</span>' : '')
       + '</div>'
-      + '<div style="display:flex;flex-wrap:wrap;gap:0.5rem">'
-      + (team.players||[]).map(function(id){
-          var pts = (team.playerPoints&&team.playerPoints[id]) || 0;
-          var isC = id === team.captainId;
-          var isVC = id === team.viceCaptainId;
-          return '<span class="member-chip">' + id + (isC?'<span class="cap-badge">C</span>':"") + (isVC?'<span class="vc-badge">VC</span>':"") + '<span style="color:var(--gold)">' + pts + 'pts</span></span>';
-        }).join("")
-      + '</div></div></div>';
+      + '<h3 style="font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">&#127955; ' + (team.matchName||team.matchId) + '</h3>'
+      + '<div style="font-size:0.75rem;color:var(--muted);margin-top:0.2rem">'
+      + '<span style="color:var(--gold)">&#128081; C: <strong>' + capName + '</strong></span>'
+      + '<span style="margin:0 0.5rem;color:var(--border2)">|</span>'
+      + '<span style="color:var(--blue)">&#11088; VC: <strong>' + vcName + '</strong></span>'
+      + '</div>'
+      + editBtn
+      + '</div>'
+      + '<div style="text-align:right;flex-shrink:0;margin-left:1rem">'
+      + '<div style="font-family:\'Rajdhani\',sans-serif;font-size:2rem;font-weight:700;color:var(--gold);line-height:1">' + (team.points||0) + '</div>'
+      + '<div style="font-size:0.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Points</div>'
+      + '</div></div>'
+      + scoreHtml
+      + '<div class="team-grid" style="padding:1rem 1.25rem">' + playersHtml + '</div>'
+      + '</div>';
   }).join("");
 }
 
@@ -1961,9 +2454,34 @@ async function loadLeaderboard() {
       container.innerHTML = '<div class="empty-state"><div class="icon">&#127942;</div><div>No scores yet</div></div>';
       return;
     }
+
+    // Add live (non-finalized) points on top of stored totalPoints
+    // so the leaderboard reflects ongoing matches in real-time
+    try {
+      var allTeamsSnap = await db.collection("teams").get();
+      var liveBonus = {}; // userId → extra live points not yet finalized
+      allTeamsSnap.forEach(function(d) {
+        var t = d.data();
+        if (!t.pointsFinalized && t.points && t.userId) {
+          liveBonus[t.userId] = (liveBonus[t.userId] || 0) + (t.points || 0);
+        }
+      });
+      // Merge into user objects
+      users.forEach(function(u) {
+        u._liveBonus = liveBonus[u.id] || 0;
+        u._displayPoints = (u.totalPoints || 0) + u._liveBonus;
+      });
+    } catch(e) {
+      users.forEach(function(u) { u._liveBonus = 0; u._displayPoints = u.totalPoints || 0; });
+    }
+
+    // Re-sort by displayPoints
+    users.sort(function(a, b) { return b._displayPoints - a._displayPoints; });
+
     var bySeasonPts = users.slice().sort(function(a,b){ return (b.seasonPoints||0)-(a.seasonPoints||0); });
     var seasonRank = {};
     bySeasonPts.forEach(function(u,i){ seasonRank[u.id] = i+1; });
+
     container.innerHTML = '<div class="card">'
       + '<div style="display:flex;gap:1rem;margin-bottom:1rem;font-size:0.8rem;color:var(--muted);flex-wrap:wrap">'
       + '<span>Fantasy Points = total points scored across all matches</span>'
@@ -1971,10 +2489,13 @@ async function loadLeaderboard() {
       + '</div>'
       + '<table class="leaderboard-table"><thead><tr><th>#</th><th>Player</th><th>Fantasy Points</th><th>Matches</th><th style="color:var(--gold)">&#11088; Season Points</th></tr></thead><tbody>'
       + users.map(function(u, i) {
+          var liveTag = u._liveBonus > 0
+            ? ' <span style="font-size:0.7rem;color:var(--green);vertical-align:middle">+'+u._liveBonus+' live</span>'
+            : '';
           return '<tr class="' + (u.id===currentUser.uid?"me-row":"") + '">'
             + '<td><div class="rank-badge ' + (i<3?"rank-"+(i+1):"rank-other") + '">' + (i+1) + '</div></td>'
             + '<td><div style="font-weight:500">' + (u.fullname||u.username||u.email||"Unknown") + '</div>' + (u.id===currentUser.uid?'<div style="font-size:0.75rem;color:var(--teal)">You</div>':"") + '</td>'
-            + '<td style="color:var(--teal);font-weight:700;font-family:\'Rajdhani\',sans-serif;font-size:1.1rem">' + (u.totalPoints||0) + '</td>'
+            + '<td style="color:var(--teal);font-weight:700;font-family:\'Rajdhani\',sans-serif;font-size:1.1rem">' + u._displayPoints + liveTag + '</td>'
             + '<td style="color:var(--muted)">' + (u.matchesPlayed||0) + '</td>'
             + '<td><div style="display:flex;align-items:center;gap:0.5rem">'
             + '<span style="color:var(--gold);font-weight:700;font-family:\'Rajdhani\',sans-serif;font-size:1.2rem">' + (u.seasonPoints||0) + '</span>'
@@ -1998,12 +2519,457 @@ function showToast(msg, type) {
   setTimeout(function(){ toast.classList.remove("show"); }, 3000);
 }
 
+// ============================================================
+// LIVE POINTS ENGINE
+// Polls every 60s for live matches → fetches scorecard →
+// computes fantasy points per player → writes to Firestore
+// ============================================================
 var scoreInterval = null;
+var _livePointsRunning = {}; // matchId → true, prevents overlapping runs
+
+async function viewPlayerTeam(userId, matchId) {
+  // Show another player's team for a given match in a modal
+  if (!isConfigured) return;
+  try {
+    var snap = await db.collection("teams").where("userId","==",userId).where("matchId","==",matchId).get();
+    if (snap.empty) { showToast("No team found for this player", "error"); return; }
+    var team = snap.docs[0].data();
+    var match = (window._matches||[]).find(function(m){ return m.id === matchId; });
+    var t1short = match && match.teamInfo && match.teamInfo[0] ? match.teamInfo[0].shortname : "";
+    var t2short = match && match.teamInfo && match.teamInfo[1] ? match.teamInfo[1].shortname : "";
+    var allPlayers = (IPL_2026_SQUADS[t1short]||[]).concat(IPL_2026_SQUADS[t2short]||[]);
+    function pName(pid) { var p = allPlayers.find(function(x){ return x.id===pid; }); return p?p.name:pid; }
+    function pRole(pid) { var p = allPlayers.find(function(x){ return x.id===pid; }); return p?p.role:""; }
+    function pTeam(pid) { var p = allPlayers.find(function(x){ return x.id===pid; }); return p?p.team:""; }
+    // Get player display name from Firestore
+    var userDoc = await db.collection("users").doc(userId).get();
+    var uName = userDoc.data() ? (userDoc.data().fullname || userDoc.data().username || userId) : userId;
+    var grouped = {WK:[],BAT:[],AR:[],BOWL:[]};
+    (team.players||[]).forEach(function(pid){ var r=pRole(pid); if(grouped[r]) grouped[r].push(pid); else grouped.BAT.push(pid); });
+    var roleLabels={WK:"Wicket Keepers",BAT:"Batters",AR:"All Rounders",BOWL:"Bowlers"};
+    var roleIcons={WK:"🧤",BAT:"🏏",AR:"⚡",BOWL:"🎯"};
+    var playersHtml = Object.keys(grouped).map(function(role) {
+      if (!grouped[role].length) return "";
+      return '<div style="margin-bottom:0.85rem">'
+        + '<div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:0.4rem">'+roleIcons[role]+' '+roleLabels[role]+'</div>'
+        + '<div style="display:flex;flex-wrap:wrap;gap:0.4rem">'
+        + grouped[role].map(function(pid){
+            var isC = pid===team.captainId, isVC=pid===team.viceCaptainId;
+            var pts = (team.playerPoints&&team.playerPoints[pid])||0;
+            var tm = pTeam(pid);
+            var tc = tm===t1short?"var(--teal)":"var(--blue)";
+            return '<span style="display:inline-flex;align-items:center;gap:0.3rem;background:var(--bg3);border:1px solid var(--border);border-left:3px solid '+tc+';border-radius:8px;padding:0.3rem 0.6rem;font-size:0.78rem">'
+              + pName(pid)
+              + (isC?' <span class="cap-badge">C</span>':"")
+              + (isVC?' <span class="vc-badge">VC</span>':"")
+              + '<span style="color:'+(pts>0?'var(--gold)':'var(--muted)')+';font-size:0.7rem"> '+pts+' pts</span>'
+              + '</span>';
+          }).join("")
+        + '</div></div>';
+    }).join("");
+    // Use the existing group modal for display
+    document.getElementById("group-modal-title").innerHTML = uName + "'s Team";
+    document.getElementById("group-modal-content").innerHTML =
+      '<div style="font-size:0.8rem;color:var(--muted);margin-bottom:0.75rem">'+(match?match.name:"")+'</div>'
+      + '<div style="display:flex;gap:1rem;margin-bottom:0.75rem;font-size:0.8rem">'
+      + '<span style="color:var(--gold)">&#128081; C: <strong>'+pName(team.captainId||"")+'</strong></span>'
+      + '<span style="color:var(--blue)">&#11088; VC: <strong>'+pName(team.viceCaptainId||"")+'</strong></span>'
+      + '</div>'
+      + playersHtml
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.5rem;padding-top:0.75rem;border-top:1px solid var(--border)">'
+      + '<span style="font-size:0.85rem;color:var(--muted)">Total Points: <strong style="color:var(--gold)">'+( team.points||0)+'</strong></span>'
+      + '<button class="btn btn-outline btn-sm" type="button" onclick="closeGroupModal()">Close</button></div>';
+    document.getElementById("group-modal").style.display = "flex";
+  } catch(e) { showToast("Error loading team: " + e.message, "error"); }
+}
+
 function startLiveScoreTracking() {
   if (scoreInterval) clearInterval(scoreInterval);
-  scoreInterval = setInterval(function(){
-    if (CRIC_API_KEY !== "YOUR_CRICAPI_KEY") loadMatches();
-  }, 60000);
+  // Run immediately, then every 15 minutes
+  runLivePointsCycle();
+  // Also check for unfinalized completed matches on start
+  checkAndFinalizeCompletedMatches();
+  scoreInterval = setInterval(runLivePointsCycle, 900000); // every 15 minutes
+}
+
+async function runLivePointsCycle() {
+  if (!currentUser) return;
+  var matches = window._matches || MOCK_MATCHES;
+  // All started-but-not-complete matches need live tracking
+  var liveMatches = matches.filter(function(m) {
+    return matchStarted(m) && !matchCompleted(m);
+  });
+  var likelyLive = []; // now merged into liveMatches via matchStarted()
+
+  // KEY FIX: also process completed matches that still have unfinalized teams
+  var completedUnfinalized = [];
+  if (isConfigured) {
+    try {
+      var unfSnap = await db.collection("teams").where("pointsFinalized","==",false).get();
+      var unfMatchIds = new Set();
+      unfSnap.forEach(function(d){ var t = d.data(); if (t.matchId) unfMatchIds.add(t.matchId); });
+      completedUnfinalized = matches.filter(function(m) {
+        return unfMatchIds.has(m.id)
+          && (m.ms === "result" || (m.status && (m.status.toLowerCase().includes("won") || m.status.toLowerCase().includes("drawn"))));
+      });
+    } catch(e) {}
+  }
+
+  var toProcess = liveMatches.concat(likelyLive).concat(completedUnfinalized);
+
+  // Refresh scores from API
+  if (CRIC_API_KEY !== "YOUR_CRICAPI_KEY") {
+    try {
+      var res = await cricFetch("https://api.cricapi.com/v1/matches?apikey=" + CRIC_API_KEY + "&offset=0");
+      var data = res;  // cricFetch returns parsed JSON
+      var apiMatches = (data.data || []).filter(function(m) {
+        return m.name && (m.name.includes("IPL") || m.series_id === "d5a498c8-7596-4b93-8ab0-e0efc3345312" ||
+          ["MI","CSK","RCB","KKR","SRH","DC","PBKS","RR","GT","LSG"].some(function(t){ return m.name.includes(t); }));
+      });
+      if (apiMatches.length && window._matches) {
+        apiMatches.forEach(function(am) {
+          var idx = window._matches.findIndex(function(m){ return m.id === am.id; });
+          if (idx >= 0) {
+            window._matches[idx] = Object.assign(window._matches[idx], am);
+          } else {
+            window._matches.push(am);
+          }
+          if (am.ms === "live" && !toProcess.find(function(m){ return m.id === am.id; })) {
+            toProcess.push(am);
+          }
+        });
+      }
+    } catch(e) {}
+  }
+
+  if (!toProcess.length) return;
+
+  for (var i = 0; i < toProcess.length; i++) {
+    var m = toProcess[i];
+    if (_livePointsRunning[m.id]) continue;
+    _livePointsRunning[m.id] = true;
+    try {
+      await updateLivePointsForMatch(m);
+    } catch(e) {
+      console.warn("Live points error for", m.id, e);
+    }
+    _livePointsRunning[m.id] = false;
+  }
+
+  // Refresh leaderboard if visible
+  var leaderboardEl = document.getElementById("tab-leaderboard");
+  if (leaderboardEl && leaderboardEl.style.display !== "none") loadLeaderboard();
+  // Re-render match cards
+  var myTeams = {};
+  if (isConfigured) {
+    try {
+      var snap = await db.collection("teams").where("userId","==",currentUser.uid).get();
+      snap.forEach(function(d){ myTeams[d.data().matchId] = true; });
+    } catch(e) {}
+  }
+  renderMatchCards(window._matches || MOCK_MATCHES, myTeams);
+}
+
+// Check for completed matches that have teams with points but aren't finalized yet
+// This handles the case where the app was closed when a match ended
+async function checkAndFinalizeCompletedMatches() {
+  if (!isConfigured || CRIC_API_KEY === "YOUR_CRICAPI_KEY") return;
+  // Small delay to let loadMatches populate window._matches with real API data
+  await new Promise(function(r){ setTimeout(r, 5000); });
+  var matches = window._matches || MOCK_MATCHES;
+  var completedMatches = matches.filter(function(m) { return matchCompleted(m); });
+  for (var i = 0; i < completedMatches.length; i++) {
+    var m = completedMatches[i];
+    try {
+      var teamsSnap = await db.collection("teams").where("matchId","==",m.id).get();
+      if (teamsSnap.empty) continue;
+      var teams = [];
+      teamsSnap.forEach(function(d){ teams.push(Object.assign({id:d.id},d.data())); });
+      var alreadyFinalized = teams.every(function(t){ return t.pointsFinalized; });
+      if (alreadyFinalized) continue;
+      // Try to get/update scorecard points first
+      if (_livePointsRunning[m.id]) continue;
+      _livePointsRunning[m.id] = true;
+      try {
+        await updateLivePointsForMatch(m);
+      } catch(e) { console.warn("Score update failed for", m.id, e); }
+      _livePointsRunning[m.id] = false;
+      // Then finalize (re-fetch so we get the freshly updated points)
+      var freshSnap = await db.collection("teams").where("matchId","==",m.id).get();
+      var freshTeams = [];
+      freshSnap.forEach(function(d){ freshTeams.push(Object.assign({id:d.id},d.data())); });
+      var stillUnfinalized = freshTeams.some(function(t){ return !t.pointsFinalized; });
+      if (stillUnfinalized) {
+        console.log("Finalizing completed match:", m.name);
+        await finalizeMatchPoints(m.id, freshTeams);
+        // Refresh leaderboard
+        var leaderboardEl = document.getElementById("tab-leaderboard");
+        if (leaderboardEl && leaderboardEl.style.display !== "none") loadLeaderboard();
+      }
+    } catch(e) { console.warn("Error checking match", m.id, e); }
+  }
+}
+
+async function updateLivePointsForMatch(match) {
+  if (!isConfigured) return;
+  if (CRIC_API_KEY === "YOUR_CRICAPI_KEY") return;
+
+  // 1. Fetch scorecard from CricAPI
+  var playerStats = {};
+  try {
+    var res = await cricFetch("https://api.cricapi.com/v1/match_scorecard?apikey=" + CRIC_API_KEY + "&id=" + match.id);
+    var data = res;  // cricFetch returns parsed JSON
+    if (!data.data) return;
+    playerStats = extractPlayerStatsFromScorecard(data.data);
+  } catch(e) { return; }
+
+  if (!Object.keys(playerStats).length) return;
+
+  // 2. Compute fantasy points for each player
+  var fantasyPts = {};
+  Object.keys(playerStats).forEach(function(name) {
+    fantasyPts[name] = calcFantasyPoints(playerStats[name]);
+  });
+
+  // 3. Get all fantasy teams for this match
+  var teamsSnap = await db.collection("teams").where("matchId","==",match.id).get();
+  if (teamsSnap.empty) return;
+
+  var teamsData = [];
+  teamsSnap.forEach(function(d){ teamsData.push(Object.assign({id:d.id}, d.data())); });
+
+  // 4. Build id→name map: prefer stored playerNames in each team doc
+  //    (saved at team creation time, no extra API call needed).
+  //    Fall back to fetchMatchPlayers only for teams that pre-date this feature.
+  var idToName = {};
+  teamsData.forEach(function(team) {
+    var stored = team.playerNames || {};
+    Object.keys(stored).forEach(function(pid){ if (!idToName[pid]) idToName[pid] = stored[pid]; });
+  });
+  // If any player IDs are still unmapped, try fetchMatchPlayers as fallback
+  var unmapped = teamsData.reduce(function(acc, team) {
+    (team.players || []).forEach(function(pid){ if (!idToName[pid]) acc.add(pid); });
+    return acc;
+  }, new Set());
+  if (unmapped.size > 0) {
+    try {
+      var playerList = await fetchMatchPlayers(match.id, match);
+      playerList.forEach(function(p){ if (!idToName[p.id]) idToName[p.id] = p.name; });
+    } catch(e) { console.warn("fetchMatchPlayers fallback failed:", e); }
+  }
+
+  // 5. Build batch update
+  var batch = db.batch();
+  teamsData.forEach(function(team) {
+    var playerPoints = {};
+    var totalPts = 0;
+    (team.players || []).forEach(function(pid) {
+      var pname = idToName[pid] || pid;
+      // Try exact name match, then fuzzy (last name)
+      var pts = fantasyPts[pname];
+      if (pts === undefined) {
+        var lastName = pname.split(" ").pop().toLowerCase();
+        var matchKey = Object.keys(fantasyPts).find(function(n){
+          return n.toLowerCase().includes(lastName);
+        });
+        pts = matchKey ? fantasyPts[matchKey] : 0;
+      }
+      playerPoints[pid] = pts || 0;
+      var mult = pid === team.captainId ? 2 : pid === team.viceCaptainId ? 1.5 : 1;
+      totalPts += (pts || 0) * mult;
+    });
+    batch.update(db.collection("teams").doc(team.id), {
+      playerPoints: playerPoints,
+      points: Math.round(totalPts)
+    });
+  });
+  await batch.commit();
+
+  // 6. If match just ended, finalize (totalPoints on users, season points)
+  var isNowCompleted = match.ms === "result"
+    || (match.status && (match.status.toLowerCase().includes("won") || match.status.toLowerCase().includes("drawn")));
+  if (isNowCompleted) {
+    // Check if already finalized
+    var alreadyDone = teamsData.some(function(t){ return t.pointsFinalized; });
+    if (!alreadyDone) {
+      await finalizeMatchPoints(match.id, teamsData);
+    }
+  }
+
+  console.log("Live points updated for", match.name, "—", Object.keys(fantasyPts).length, "players processed");
+}
+
+function extractPlayerStatsFromScorecard(scorecardData) {
+  // CricAPI scorecard structure: scorecard[].batting[], scorecard[].bowling[]
+  var stats = {}; // name → {runs, balls, fours, sixes, wickets, overs, runsConceded, catches, stumpings, runOuts, didBat, didBowl}
+
+  function getOrCreate(name) {
+    if (!name) return null;
+    if (!stats[name]) stats[name] = {
+      runs:0, balls:0, fours:0, sixes:0, isOut:false, notOut:false,
+      wickets:0, overs:0, maidens:0, runsConceded:0,
+      catches:0, stumpings:0, runOuts:0, didBat:false, didBowl:false, played:false
+    };
+    return stats[name];
+  }
+
+  var innings = scorecardData.scorecard || scorecardData.innings || [];
+  innings.forEach(function(inn) {
+    // Batting
+    (inn.batting || inn.batsmen || []).forEach(function(b) {
+      var name = b.batsman || b.name || b.batsmanName;
+      if (!name) return;
+      var s = getOrCreate(name);
+      if (!s) return;
+      s.runs = parseInt(b.r || b.runs || 0);
+      s.balls = parseInt(b.b || b.balls || 0);
+      s.fours = parseInt(b["4s"] || b.fours || 0);
+      s.sixes = parseInt(b["6s"] || b.sixes || 0);
+      s.isOut = !!(b.dismissal || (b.outDesc && b.outDesc !== "not out" && b.outDesc !== "batting"));
+      s.notOut = !s.isOut;
+      s.didBat = true;
+      s.played = true;
+    });
+    // Bowling
+    (inn.bowling || inn.bowlers || []).forEach(function(b) {
+      var name = b.bowler || b.name || b.bowlerName;
+      if (!name) return;
+      var s = getOrCreate(name);
+      if (!s) return;
+      var oversStr = String(b.o || b.overs || "0");
+      var overParts = oversStr.split(".");
+      s.overs = parseInt(overParts[0]) + (parseInt(overParts[1] || 0) / 6);
+      s.maidens = parseInt(b.m || b.maidens || 0);
+      s.wickets = (s.wickets || 0) + parseInt(b.w || b.wickets || 0);
+      s.runsConceded = (s.runsConceded || 0) + parseInt(b.r || b.runs || 0);
+      s.didBowl = true;
+      s.played = true;
+    });
+    // Fielding (from dismissal strings in batting)
+    (inn.batting || inn.batsmen || []).forEach(function(b) {
+      var desc = b.dismissal || b.outDesc || "";
+      if (!desc) return;
+      // "c PlayerName b Bowler" → catch; "st PlayerName b Bowler" → stumping; "run out (PlayerName)"
+      var catchMatch = desc.match(/^c\s+([^b]+)\s+b\s+/i);
+      var stumpMatch = desc.match(/^st\s+([^b]+)\s+b\s+/i);
+      var runOutMatch = desc.match(/run out \(([^)]+)\)/i);
+      if (catchMatch) {
+        var fielder = catchMatch[1].trim();
+        var fs = getOrCreate(fielder); if (fs) { fs.catches++; fs.played = true; }
+      }
+      if (stumpMatch) {
+        var stumper = stumpMatch[1].trim();
+        var ss = getOrCreate(stumper); if (ss) { ss.stumpings++; ss.played = true; }
+      }
+      if (runOutMatch) {
+        var thrower = runOutMatch[1].trim();
+        var rs = getOrCreate(thrower); if (rs) { rs.runOuts++; rs.played = true; }
+      }
+    });
+  });
+  return stats;
+}
+
+function calcFantasyPoints(s) {
+  var pts = 0;
+  if (!s) return 0;
+
+  // Playing points
+  if (s.played) pts += POINTS.playing;
+
+  // Batting
+  if (s.didBat) {
+    pts += s.runs * POINTS.run;
+    pts += s.fours * POINTS.boundary_bonus;
+    pts += s.sixes * POINTS.six_bonus;
+    if (s.runs >= 100) pts += POINTS.century;
+    else if (s.runs >= 50) pts += POINTS.half_century;
+    if (s.runs === 0 && s.isOut) pts += POINTS.duck;
+    // Strike rate (min 10 balls)
+    if (s.balls >= 10) {
+      var sr = (s.runs / s.balls) * 100;
+      if (sr > 170) pts += POINTS.sr_above_170;
+      else if (sr >= 150) pts += POINTS.sr_150_to_170;
+      else if (sr >= 130) pts += POINTS.sr_130_to_150;
+      else if (sr < 50) pts += POINTS.sr_below_50;
+      else if (sr < 60) pts += POINTS.sr_50_to_60;
+      else if (sr < 70) pts += POINTS.sr_60_to_70;
+    }
+  }
+
+  // Bowling
+  if (s.didBowl) {
+    pts += s.wickets * POINTS.wicket;
+    pts += s.maidens * POINTS.maiden_over;
+    if (s.wickets >= 5) pts += POINTS.five_wicket_bonus;
+    else if (s.wickets >= 4) pts += POINTS.four_wicket_bonus;
+    // Economy (min 2 overs)
+    if (s.overs >= 2) {
+      var eco = s.runsConceded / s.overs;
+      if (eco < 5) pts += POINTS.economy_below_5;
+      else if (eco < 6) pts += POINTS.economy_5_to_6;
+      else if (eco < 7) pts += POINTS.economy_6_to_7;
+      else if (eco >= 10 && eco < 11) pts += POINTS.economy_10_to_11;
+      else if (eco >= 11 && eco < 12) pts += POINTS.economy_11_to_12;
+      else if (eco >= 12) pts += POINTS.economy_above_12;
+    }
+  }
+
+  // Fielding
+  pts += s.catches * POINTS.catch;
+  pts += s.stumpings * POINTS.stumping;
+  pts += s.runOuts * POINTS.run_out_direct;
+
+  return Math.round(pts);
+}
+
+async function finalizeMatchPoints(matchId, teamsData) {
+  if (!isConfigured) return;
+  // Re-fetch fresh team data so we have the latest points from the scorecard update
+  var freshSnap = await db.collection("teams").where("matchId","==",matchId).get();
+  var freshTeams = [];
+  freshSnap.forEach(function(d){ freshTeams.push(Object.assign({id:d.id}, d.data())); });
+
+  // Only process teams not yet finalized to prevent double-counting
+  var toFinalize = freshTeams.filter(function(t){ return !t.pointsFinalized; });
+  if (!toFinalize.length) {
+    console.log("finalizeMatchPoints: all teams already finalized for", matchId);
+    return;
+  }
+
+  // Sum each user's points across their teams for this match
+  var userPointsMap = {};
+  toFinalize.forEach(function(team) {
+    if (!userPointsMap[team.userId]) userPointsMap[team.userId] = 0;
+    userPointsMap[team.userId] += (team.points || 0);
+  });
+
+  // Fetch current user totals so we can set absolute values (avoids double-increment bugs)
+  var userCurrentTotals = {};
+  await Promise.all(Object.keys(userPointsMap).map(async function(uid) {
+    try {
+      var snap = await db.collection("users").doc(uid).get();
+      var d = snap.data() || {};
+      userCurrentTotals[uid] = { totalPoints: d.totalPoints || 0, matchesPlayed: d.matchesPlayed || 0 };
+    } catch(e) { userCurrentTotals[uid] = { totalPoints: 0, matchesPlayed: 0 }; }
+  }));
+
+  var batch = db.batch();
+  // Mark teams as finalized
+  toFinalize.forEach(function(team) {
+    batch.update(db.collection("teams").doc(team.id), { pointsFinalized: true });
+  });
+  // Write absolute totals to user docs (set with merge = safe for new or existing docs)
+  for (var uid in userPointsMap) {
+    var prev = userCurrentTotals[uid] || { totalPoints: 0, matchesPlayed: 0 };
+    batch.set(db.collection("users").doc(uid), {
+      totalPoints: prev.totalPoints + userPointsMap[uid],
+      matchesPlayed: prev.matchesPlayed + 1
+    }, { merge: true });
+  }
+  await batch.commit();
+  await computeAndSaveSeasonPoints(matchId);
+  showToast("Match ended — points finalized!", "success");
 }
 
 function showDemoMode() {
@@ -2025,14 +2991,6 @@ window.addEventListener("DOMContentLoaded", function() {
       + '</div>'
     );
   }
-  if (!configured) {
-    document.getElementById("auth-page").querySelector(".auth-box").insertAdjacentHTML("beforeend",
-      '<div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border);text-align:center">'
-      + '<button class="btn btn-outline" type="button" onclick="showDemoMode()" style="font-size:0.8rem">&#9654; Try Demo Mode (no setup needed)</button>'
-      + '</div>'
-    );
-  }
-  startLiveScoreTracking();
 });
 
 
@@ -2049,5 +3007,3 @@ window.addEventListener("DOMContentLoaded", function() {
 </script>
 </body>
 </html>
-
-
